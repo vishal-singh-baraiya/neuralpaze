@@ -39,7 +39,7 @@ export const DesignCanvas = forwardRef<HTMLDivElement, DesignCanvasProps>(
         className="flex-1 relative overflow-hidden bg-gray-800"
         style={{
           backgroundImage: showGrid
-            ? `radial-gradient(circle, rgba(255,255,255,0.3) 1.5px, transparent 1.5px)`
+            ? `radial-gradient(circle, rgba(255,255,255,0.7) 1.5px, transparent 1.5px)`
             : "none",
           backgroundSize: showGrid ? `20px 20px` : "auto",
         }}
