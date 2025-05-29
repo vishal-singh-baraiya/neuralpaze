@@ -49,7 +49,7 @@ from typing import Optional, Tuple, Dict
         
 `
 
-  // Generate layer definitions in the execution order, not original order
+  // Generate layer definitions in the execution order
   sortedComponents.forEach((comp, executionIndex) => {
     const layerName = `step_${executionIndex}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
     
@@ -164,16 +164,17 @@ function generateForwardMethodWithConnections(
 ): string {
   let code = `
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Forward pass following the network connections
+        activations: Dict[str, torch.Tensor] = {}
+        
 `
 
-  if (sortedComponents.length === 0) {
-    code += "        return x\n"
-    return code
-  }
-
-  code += "        # Forward pass following the network connections\n"
-  code += "        activations: Dict[str, torch.Tensor] = {}\n"
-  code += "        \n"
+  // Create a mapping of component IDs to layer names
+  const idToLayerName = new Map<string, string>()
+  sortedComponents.forEach((comp, executionIndex) => {
+    const layerName = `step_${executionIndex}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
+    idToLayerName.set(comp.id, layerName)
+  })
 
   // Find input components (components with no inputs from other components)
   const inputComponents = sortedComponents.filter(comp => {
@@ -184,29 +185,29 @@ function generateForwardMethodWithConnections(
   // Initialize input activations
   if (inputComponents.length === 1) {
     code += `        # Initialize input\n`
-    code += `        activations['${inputComponents[0].id}'] = x\n`
+    code += `        activations['${idToLayerName.get(inputComponents[0].id)}'] = x\n`
     code += "        \n"
   } else if (inputComponents.length > 1) {
     code += `        # Multiple input components detected\n`
     code += `        # Assuming input x will be used for the first component\n`
     inputComponents.forEach((comp, idx) => {
       if (idx === 0) {
-        code += `        activations['${comp.id}'] = x\n`
+        code += `        activations['${idToLayerName.get(comp.id)}'] = x\n`
       } else {
-        code += `        # activations['${comp.id}'] = your_input_${idx}  # TODO: Provide appropriate input\n`
+        code += `        # activations['${idToLayerName.get(comp.id)}'] = your_input_${idx}  # TODO: Provide appropriate input\n`
       }
     })
     code += "        \n"
   } else {
     // No clear input components, use first component as input
     code += `        # No clear input component found, using first component\n`
-    code += `        activations['${sortedComponents[0].id}'] = x\n`
+    code += `        activations['${idToLayerName.get(sortedComponents[0].id)}'] = x\n`
     code += "        \n"
   }
 
   // Process components in execution order
   sortedComponents.forEach((comp, executionIndex) => {
-    const layerName = `step_${executionIndex}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
+    const layerName = idToLayerName.get(comp.id)!
     const compInfo = connectionInfo.get(comp.id)!
     
     // Skip if this is an input component that's already initialized
@@ -222,39 +223,39 @@ function generateForwardMethodWithConnections(
         inputExpression = "x"
       } else {
         const prevComp = sortedComponents[executionIndex - 1]
-        inputExpression = `activations['${prevComp.id}']`
+        inputExpression = `activations['${idToLayerName.get(prevComp.id)}']`
       }
     } else if (compInfo.inputs.length === 1) {
       // Single input
-      inputExpression = `activations['${compInfo.inputs[0]}']`
+      inputExpression = `activations['${idToLayerName.get(compInfo.inputs[0])}']`
     } else {
       // Multiple inputs - handle based on component type
       if (comp.type === "Concatenate") {
-        const inputRefs = compInfo.inputs.map(id => `activations['${id}']`).join(", ")
+        const inputRefs = compInfo.inputs.map(id => `activations['${idToLayerName.get(id)}']`).join(", ")
         inputExpression = `torch.cat([${inputRefs}], dim=-1)`
       } else if (comp.type === "Add" || comp.type === "Residual") {
-        const inputRefs = compInfo.inputs.map(id => `activations['${id}']`).join(" + ")
+        const inputRefs = compInfo.inputs.map(id => `activations['${idToLayerName.get(id)}']`).join(" + ")
         inputExpression = inputRefs
       } else {
         // Default to first input for other component types
-        inputExpression = `activations['${compInfo.inputs[0]}']`
+        inputExpression = `activations['${idToLayerName.get(compInfo.inputs[0])}']`
         code += `        # Warning: ${comp.type} received multiple inputs, using first one\n`
       }
     }
 
     // Generate the forward pass for this component
-    code += `        # Step ${executionIndex}: ${comp.type} (${comp.id})\n`
+    code += `        # Step ${executionIndex}: ${comp.type} (${layerName})\n`
     
     switch (comp.type) {
       case "MultiHeadAttention":
       case "SparseAttention":
-        code += `        activations['${comp.id}'], _ = self.${layerName}(${inputExpression}, ${inputExpression}, ${inputExpression})  # self-attention\n`
+        code += `        activations['${layerName}'], _ = self.${layerName}(${inputExpression}, ${inputExpression}, ${inputExpression})  # self-attention\n`
         break
 
       case "GroupedQueryAttention":
       case "MixtureOfExperts":
       case "MambaBlock":
-        code += `        activations['${comp.id}'] = self.${layerName}(${inputExpression})\n`
+        code += `        activations['${layerName}'] = self.${layerName}(${inputExpression})\n`
         break
 
       case "FeedForward":
@@ -263,58 +264,58 @@ function generateForwardMethodWithConnections(
         if (comp.params.dropout) {
           code += `        temp = self.${layerName}_dropout(temp)\n`
         }
-        code += `        activations['${comp.id}'] = self.${layerName}_linear2(temp)\n`
+        code += `        activations['${layerName}'] = self.${layerName}_linear2(temp)\n`
         break
 
       case "GLU":
         code += `        gate = self.${layerName}_gate(${inputExpression})\n`
         code += `        up = self.${layerName}_up(${inputExpression})\n`
-        code += `        activations['${comp.id}'] = self.${layerName}_down(gate * F.${comp.params.activation || "silu"}(up))\n`
+        code += `        activations['${layerName}'] = self.${layerName}_down(gate * F.${comp.params.activation || "silu"}(up))\n`
         break
 
       case "RotaryPositionalEncoding":
         code += `        pos_emb = self.${layerName}(${inputExpression})\n`
-        code += `        activations['${comp.id}'] = ${inputExpression} + pos_emb\n`
+        code += `        activations['${layerName}'] = ${inputExpression} + pos_emb\n`
         break
 
       case "ALiBi":
         code += `        # ALiBi bias applied during attention (placeholder)\n`
-        code += `        activations['${comp.id}'] = ${inputExpression}  # ALiBi modifies attention scores, not input directly\n`
+        code += `        activations['${layerName}'] = ${inputExpression}  # ALiBi modifies attention scores, not input directly\n`
         break
 
       case "Residual":
         if (compInfo.inputs.length >= 2) {
-          code += `        activations['${comp.id}'] = ${inputExpression}\n`
+          code += `        activations['${layerName}'] = ${inputExpression}\n`
         } else {
           code += `        # Residual connection needs at least 2 inputs\n`
-          code += `        activations['${comp.id}'] = ${inputExpression}\n`
+          code += `        activations['${layerName}'] = ${inputExpression}\n`
         }
         break
 
       case "Add":
         if (compInfo.inputs.length >= 2) {
-          code += `        activations['${comp.id}'] = ${inputExpression}\n`
+          code += `        activations['${layerName}'] = ${inputExpression}\n`
         } else {
-          code += `        activations['${comp.id}'] = ${inputExpression}\n`
+          code += `        activations['${layerName}'] = ${inputExpression}\n`
         }
         break
 
       case "Concatenate":
         if (compInfo.inputs.length >= 2) {
-          code += `        activations['${comp.id}'] = ${inputExpression}\n`
+          code += `        activations['${layerName}'] = ${inputExpression}\n`
         } else {
-          code += `        activations['${comp.id}'] = ${inputExpression}\n`
+          code += `        activations['${layerName}'] = ${inputExpression}\n`
         }
         break
 
       case "Split":
         const outputsCount = compInfo.outputs.length || 2
         code += `        split_outputs = torch.chunk(${inputExpression}, ${outputsCount}, dim=-1)\n`
-        code += `        activations['${comp.id}'] = split_outputs[0]  # Using first split as main output\n`
+        code += `        activations['${layerName}'] = split_outputs[0]  # Using first split as main output\n`
         break
 
       default:
-        code += `        activations['${comp.id}'] = self.${layerName}(${inputExpression})\n`
+        code += `        activations['${layerName}'] = self.${layerName}(${inputExpression})\n`
     }
     
     code += "        \n"
@@ -328,16 +329,16 @@ function generateForwardMethodWithConnections(
 
   if (outputComponents.length === 1) {
     code += `        # Return final output\n`
-    code += `        return activations['${outputComponents[0].id}']\n`
+    code += `        return activations['${idToLayerName.get(outputComponents[0].id)}']\n`
   } else if (outputComponents.length > 1) {
     code += `        # Multiple output components detected, returning tuple\n`
-    const outputRefs = outputComponents.map(comp => `activations['${comp.id}']`).join(", ")
+    const outputRefs = outputComponents.map(comp => `activations['${idToLayerName.get(comp.id)}']`).join(", ")
     code += `        return (${outputRefs})\n`
   } else {
     // No clear output, return the last processed component
     code += `        # No clear output component, returning last activation\n`
     if (sortedComponents.length > 0) {
-      code += `        return activations['${sortedComponents[sortedComponents.length - 1].id}']\n`
+      code += `        return activations['${idToLayerName.get(sortedComponents[sortedComponents.length - 1].id)}']\n`
     } else {
       code += `        return x\n`
     }
