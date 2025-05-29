@@ -39,16 +39,23 @@ from typing import Optional, Tuple
     code += helperClasses
   }
 
+  // Sort components based on their connections to get execution order
+  const sortedComponents = topologicalSort(components, connections)
+  const connectionInfo = analyzeConnections(components, connections)
+
+  // Check if the architecture is sequential
+  const isSequential = isSequentialArchitecture(sortedComponents, connectionInfo)
+
   code += `class GeneratedNetwork(nn.Module):
     def __init__(self):
         super().__init__()
         
 `
 
-  // Generate layer definitions
-  components.forEach((comp, index) => {
-    const layerName = `layer_${index}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
-
+  // Generate layer definitions in the execution order
+  sortedComponents.forEach((comp, executionIndex) => {
+    const layerName = `layer_${executionIndex}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
+    
     try {
       code += generateLayerDefinition(comp, layerName)
     } catch (error) {
@@ -58,7 +65,7 @@ from typing import Optional, Tuple
   })
 
   // Generate forward method
-  code += generateForwardMethod(components, connections)
+  code += generateForwardMethodWithConnections(sortedComponents, connectionInfo, isSequential)
 
   code += `
 # Usage example:
@@ -69,6 +76,329 @@ from typing import Optional, Tuple
 # optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 # criterion = nn.CrossEntropyLoss()
 `
+
+  return code
+}
+
+function topologicalSort(components: Component[], connections: Connection[]): Component[] {
+  // Create adjacency list and in-degree count
+  const adjacencyList = new Map<string, string[]>()
+  const inDegree = new Map<string, number>()
+  const componentMap = new Map<string, Component>()
+
+  // Initialize maps
+  components.forEach(comp => {
+    adjacencyList.set(comp.id, [])
+    inDegree.set(comp.id, 0)
+    componentMap.set(comp.id, comp)
+  })
+
+  // Build graph from connections
+  connections.forEach(conn => {
+    if (adjacencyList.has(conn.from) && adjacencyList.has(conn.to)) {
+      adjacencyList.get(conn.from)!.push(conn.to)
+      inDegree.set(conn.to, (inDegree.get(conn.to) || 0) + 1)
+    }
+  })
+
+  // Kahn's algorithm for topological sorting
+  const queue: string[] = []
+  const result: Component[] = []
+
+  // Find all nodes with no incoming edges
+  inDegree.forEach((degree, nodeId) => {
+    if (degree === 0) {
+      queue.push(nodeId)
+    }
+  })
+
+  while (queue.length > 0) {
+    const currentId = queue.shift()!
+    const currentComponent = componentMap.get(currentId)!
+    result.push(currentComponent)
+
+    // Process all neighbors
+    adjacencyList.get(currentId)!.forEach(neighborId => {
+      inDegree.set(neighborId, inDegree.get(neighborId)! - 1)
+      if (inDegree.get(neighborId) === 0) {
+        queue.push(neighborId)
+      }
+    })
+  }
+
+  // If we couldn't sort all components, there might be a cycle or disconnected components
+  if (result.length !== components.length) {
+    console.warn("Could not perform complete topological sort - using original order for missing components")
+    // Add any missing components at the end
+    const resultIds = new Set(result.map(c => c.id))
+    components.forEach(comp => {
+      if (!resultIds.has(comp.id)) {
+        result.push(comp)
+      }
+    })
+  }
+
+  return result
+}
+
+function analyzeConnections(components: Component[], connections: Connection[]) {
+  const connectionMap = new Map<string, { inputs: string[], outputs: string[] }>()
+  
+  // Initialize connection info for each component
+  components.forEach(comp => {
+    connectionMap.set(comp.id, { inputs: [], outputs: [] })
+  })
+
+  // Build connection mappings
+  connections.forEach(conn => {
+    const fromInfo = connectionMap.get(conn.from)
+    const toInfo = connectionMap.get(conn.to)
+    
+    if (fromInfo) fromInfo.outputs.push(conn.to)
+    if (toInfo) toInfo.inputs.push(conn.from)
+  })
+
+  return connectionMap
+}
+
+function isSequentialArchitecture(
+  sortedComponents: Component[],
+  connectionInfo: Map<string, { inputs: string[], outputs: string[] }>
+): boolean {
+  // Check if the architecture is strictly sequential:
+  // - Each component (except first) has exactly one input
+  // - Each component (except last) has exactly one output
+  // - The components form a single chain (topological sort matches connection order)
+  for (let i = 0; i < sortedComponents.length; i++) {
+    const comp = sortedComponents[i]
+    const compInfo = connectionInfo.get(comp.id)!
+    
+    // First component: no inputs, exactly one output
+    if (i === 0) {
+      if (compInfo.inputs.length > 0 || compInfo.outputs.length !== 1) {
+        return false
+      }
+    }
+    // Last component: exactly one input, no outputs
+    else if (i === sortedComponents.length - 1) {
+      if (compInfo.inputs.length !== 1 || compInfo.outputs.length > 0) {
+        return false
+      }
+    }
+    // Middle components: exactly one input, one output
+    else {
+      if (compInfo.inputs.length !== 1 || compInfo.outputs.length !== 1) {
+        return false
+      }
+    }
+    
+    // Check if the output of component i connects to the input of component i+1
+    if (i < sortedComponents.length - 1) {
+      const nextComp = sortedComponents[i + 1]
+      if (!compInfo.outputs.includes(nextComp.id)) {
+        return false
+      }
+    }
+  }
+  return true
+}
+
+function generateForwardMethodWithConnections(
+  sortedComponents: Component[], 
+  connectionInfo: Map<string, { inputs: string[], outputs: string[] }>,
+  isSequential: boolean
+): string {
+  let code = `
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+`
+
+  if (sortedComponents.length === 0) {
+    code += "        return x\n"
+    return code
+  }
+
+  // Create a mapping of component IDs to layer names
+  const idToLayerName = new Map<string, string>()
+  sortedComponents.forEach((comp, executionIndex) => {
+    const layerName = `layer_${executionIndex}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
+    idToLayerName.set(comp.id, layerName)
+  })
+
+  if (isSequential) {
+    code += `        # Forward pass through layers\n`
+    sortedComponents.forEach((comp, executionIndex) => {
+      const layerName = idToLayerName.get(comp.id)!
+      code += `        x = self.${layerName}(x)\n`
+    })
+    code += `        return x\n`
+  } else {
+    // Fallback to dictionary-based approach for non-sequential architectures
+    code += `        # Forward pass following the network connections\n`
+    code += `        activations: Dict[str, torch.Tensor] = {}\n`
+    code += `        \n`
+
+    // Find input components
+    const inputComponents = sortedComponents.filter(comp => {
+      const info = connectionInfo.get(comp.id)
+      return !info || info.inputs.length === 0
+    })
+
+    // Initialize input activations
+    if (inputComponents.length === 1) {
+      code += `        # Initialize input\n`
+      code += `        activations['${idToLayerName.get(inputComponents[0].id)}'] = x\n`
+      code += `        \n`
+    } else if (inputComponents.length > 1) {
+      code += `        # Multiple input components detected\n`
+      code += `        # Assuming input x will be used for the first component\n`
+      inputComponents.forEach((comp, idx) => {
+        if (idx === 0) {
+          code += `        activations['${idToLayerName.get(comp.id)}'] = x\n`
+        } else {
+          code += `        # activations['${idToLayerName.get(comp.id)}'] = your_input_${idx}  # TODO: Provide appropriate input\n`
+        }
+      })
+      code += `        \n`
+    } else {
+      code += `        # No clear input component found, using first component\n`
+      code += `        activations['${idToLayerName.get(sortedComponents[0].id)}'] = x\n`
+      code += `        \n`
+    }
+
+    // Process components in execution order
+    sortedComponents.forEach((comp, executionIndex) => {
+      const layerName = idToLayerName.get(comp.id)!
+      const compInfo = connectionInfo.get(comp.id)!
+      
+      // Skip if this is an input component that's already initialized
+      if (inputComponents.includes(comp) && compInfo.inputs.length === 0) {
+        return
+      }
+      
+      // Determine input for this component
+      let inputExpression = ""
+      if (compInfo.inputs.length === 0) {
+        if (executionIndex === 0) {
+          inputExpression = "x"
+        } else {
+          const prevComp = sortedComponents[executionIndex - 1]
+          inputExpression = `activations['${idToLayerName.get(prevComp.id)}']`
+        }
+      } else if (compInfo.inputs.length === 1) {
+        inputExpression = `activations['${idToLayerName.get(compInfo.inputs[0])}']`
+      } else {
+        if (comp.type === "Concatenate") {
+          const inputRefs = compInfo.inputs.map(id => `activations['${idToLayerName.get(id)}']`).join(", ")
+          inputExpression = `torch.cat([${inputRefs}], dim=-1)`
+        } else if (comp.type === "Add" || comp.type === "Residual") {
+          const inputRefs = compInfo.inputs.map(id => `activations['${idToLayerName.get(id)}']`).join(" + ")
+          inputExpression = inputRefs
+        } else {
+          inputExpression = `activations['${idToLayerName.get(compInfo.inputs[0])}']`
+          code += `        # Warning: ${comp.type} received multiple inputs, using first one\n`
+        }
+      }
+
+      // Generate the forward pass for this component
+      code += `        # Step ${executionIndex}: ${comp.type} (${layerName})\n`
+      
+      switch (comp.type) {
+        case "MultiHeadAttention":
+        case "SparseAttention":
+          code += `        activations['${layerName}'], _ = self.${layerName}(${inputExpression}, ${inputExpression}, ${inputExpression})  # self-attention\n`
+          break
+
+        case "GroupedQueryAttention":
+        case "MixtureOfExperts":
+        case "MambaBlock":
+          code += `        activations['${layerName}'] = self.${layerName}(${inputExpression})\n`
+          break
+
+        case "FeedForward":
+          code += `        temp = self.${layerName}_linear1(${inputExpression})\n`
+          code += `        temp = self.${layerName}_activation(temp)\n`
+          if (comp.params.dropout) {
+            code += `        temp = self.${layerName}_dropout(temp)\n`
+          }
+          code += `        activations['${layerName}'] = self.${layerName}_linear2(temp)\n`
+          break
+
+        case "GLU":
+          code += `        gate = self.${layerName}_gate(${inputExpression})\n`
+          code += `        up = self.${layerName}_up(${inputExpression})\n`
+          code += `        activations['${layerName}'] = self.${layerName}_down(gate * F.${comp.params.activation || "silu"}(up))\n`
+          break
+
+        case "RotaryPositionalEncoding":
+          code += `        pos_emb = self.${layerName}(${inputExpression})\n`
+          code += `        activations['${layerName}'] = ${inputExpression} + pos_emb\n`
+          break
+
+        case "ALiBi":
+          code += `        # ALiBi bias applied during attention (placeholder)\n`
+          code += `        activations['${layerName}'] = ${inputExpression}  # ALiBi modifies attention scores, not input directly\n`
+          break
+
+        case "Residual":
+          if (compInfo.inputs.length >= 2) {
+            code += `        activations['${layerName}'] = ${inputExpression}\n`
+          } else {
+            code += `        # Residual connection needs at least 2 inputs\n`
+            code += `        activations['${layerName}'] = ${inputExpression}\n`
+          }
+          break
+
+        case "Add":
+          if (compInfo.inputs.length >= 2) {
+            code += `        activations['${layerName}'] = ${inputExpression}\n`
+          } else {
+            code += `        activations['${layerName}'] = ${inputExpression}\n`
+          }
+          break
+
+        case "Concatenate":
+          if (compInfo.inputs.length >= 2) {
+            code += `        activations['${layerName}'] = ${inputExpression}\n`
+          } else {
+            code += `        activations['${layerName}'] = ${inputExpression}\n`
+          }
+          break
+
+        case "Split":
+          const outputsCount = compInfo.outputs.length || 2
+          code += `        split_outputs = torch.chunk(${inputExpression}, ${outputsCount}, dim=-1)\n`
+          code += `        activations['${layerName}'] = split_outputs[0]  # Using first split as main output\n`
+          break
+
+        default:
+          code += `        activations['${layerName}'] = self.${layerName}(${inputExpression})\n`
+      }
+      
+      code += `        \n`
+    })
+
+    // Find output components
+    const outputComponents = sortedComponents.filter(comp => {
+      const info = connectionInfo.get(comp.id)
+      return !info || info.outputs.length === 0
+    })
+
+    if (outputComponents.length === 1) {
+      code += `        # Return final output\n`
+      code += `        return activations['${idToLayerName.get(outputComponents[0].id)}']\n`
+    } else if (outputComponents.length > 1) {
+      code += `        # Multiple output components detected, returning tuple\n`
+      const outputRefs = outputComponents.map(comp => `activations['${idToLayerName.get(comp.id)}']`).join(", ")
+      code += `        return (${outputRefs})\n`
+    } else {
+      code += `        # No clear output component, returning last activation\n`
+      if (sortedComponents.length > 0) {
+        code += `        return activations['${idToLayerName.get(sortedComponents[sortedComponents.length - 1].id)}']\n`
+      } else {
+        code += `        return x\n`
+      }
+    }
+  }
 
   return code
 }
@@ -369,82 +699,5 @@ function generateLayerDefinition(comp: Component, layerName: string): string {
       code += `        self.${layerName} = nn.${comp.type}(${params})\n`
   }
 
-  return code
-}
-
-function generateForwardMethod(components: Component[], connections: Connection[]): string {
-  let code = `
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-`
-
-  if (components.length === 0) {
-    code += "        return x\n"
-    return code
-  }
-
-  code += "        # Forward pass through layers\n"
-
-  components.forEach((comp, index) => {
-    const layerName = `layer_${index}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
-
-    switch (comp.type) {
-      case "MultiHeadAttention":
-      case "SparseAttention":
-        code += `        x, _ = self.${layerName}(x, x, x)  # self-attention\n`
-        break
-
-      case "GroupedQueryAttention":
-      case "MixtureOfExperts":
-      case "MambaBlock":
-        code += `        x = self.${layerName}(x)\n`
-        break
-
-      case "FeedForward":
-        code += `        x = self.${layerName}_linear1(x)\n`
-        code += `        x = self.${layerName}_activation(x)\n`
-        if (comp.params.dropout) {
-          code += `        x = self.${layerName}_dropout(x)\n`
-        }
-        code += `        x = self.${layerName}_linear2(x)\n`
-        break
-
-      case "GLU":
-        code += `        gate = self.${layerName}_gate(x)\n`
-        code += `        up = self.${layerName}_up(x)\n`
-        code += `        x = self.${layerName}_down(gate * F.${comp.params.activation || "silu"}(up))\n`
-        break
-
-      case "RotaryPositionalEncoding":
-        code += `        pos_emb = self.${layerName}(x)\n`
-        code += `        # Apply rotary encoding (simplified)\n`
-        code += `        x = x + pos_emb\n`
-        break
-
-      case "ALiBi":
-        code += `        # ALiBi bias applied during attention (placeholder)\n`
-        code += `        x = x  # ALiBi modifies attention scores, not input directly\n`
-        break
-
-      case "Residual":
-        code += `        # Residual connection (requires proper implementation)\n`
-        code += `        residual = x\n`
-        break
-
-      case "Concatenate":
-        code += `        # Concatenation (requires multiple inputs)\n`
-        code += `        x = x  # Placeholder for concatenation\n`
-        break
-
-      case "Split":
-        code += `        # Split tensor (returns multiple outputs)\n`
-        code += `        x = x  # Placeholder for split operation\n`
-        break
-
-      default:
-        code += `        x = self.${layerName}(x)\n`
-    }
-  })
-
-  code += "        return x\n"
   return code
 }
