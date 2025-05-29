@@ -2,43 +2,20 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Aggressive ResizeObserver error suppression */
-.react-flow__error,
-.react-flow__error-message,
-.react-flow__error-boundary {
+/* Suppress ResizeObserver errors in development */
+.react-flow__error {
   display: none !important;
-  visibility: hidden !important;
-  opacity: 0 !important;
 }
 
-/* Hide all error overlays */
+/* Hide webpack dev server overlay for ResizeObserver errors */
 #webpack-dev-server-client-overlay,
-#webpack-dev-server-client-overlay-div,
-div[data-nextjs-dialog-overlay],
-div[data-nextjs-dialog],
-.nextjs__container_errors_label,
-.nextjs__container_errors,
-.nextjs__container_build_error,
-[data-nextjs-toast],
-[data-testid="nextjs__container_errors"] {
+#webpack-dev-server-client-overlay-div {
   display: none !important;
-  visibility: hidden !important;
-  opacity: 0 !important;
-  pointer-events: none !important;
 }
 
-/* Prevent ResizeObserver from triggering layout thrashing */
-.react-flow__renderer,
-.react-flow__pane,
-.react-flow__viewport {
-  contain: layout style paint !important;
-  will-change: transform !important;
-}
-
-/* React Flow styling */
+/* React Flow custom styles */
 .react-flow {
   background: black !important;
-  font-family: inherit;
 }
 
 .react-flow__node {
@@ -71,30 +48,4 @@ div[data-nextjs-dialog],
 
 .react-flow__background {
   background: black !important;
-}
-
-/* Performance optimizations */
-.react-flow__pane {
-  overflow: hidden;
-  transform: translateZ(0);
-  backface-visibility: hidden;
-}
-
-/* Suppress any remaining error displays */
-[class*="error"],
-[class*="Error"],
-[id*="error"],
-[id*="Error"] {
-  display: none !important;
-}
-
-/* Loading spinner */
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.animate-spin {
-  animation: spin 1s linear infinite;
 }

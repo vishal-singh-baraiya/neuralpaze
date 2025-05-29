@@ -2,84 +2,26 @@ import type { Component, Connection } from "../types"
 
 export function generatePyTorchCode(components: Component[], connections: Connection[]): string {
   if (!components || components.length === 0) {
-    return generateEmptyNetworkCode()
+    return "# No components to generate code for\n# Add some components to your network first!"
   }
 
-  try {
-    let code = generateImports()
-    code += generateHelperClasses(components)
-    code += generateMainNetworkClass(components, connections)
-    code += generateUsageExample()
-
-    return code
-  } catch (error) {
-    console.error("Code generation error:", error)
-    return generateErrorCode(error)
-  }
-}
-
-function generateEmptyNetworkCode(): string {
-  return `import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-class EmptyNetwork(nn.Module):
-    """
-    Empty neural network - add some components to generate meaningful code!
-    """
-    def __init__(self):
-        super().__init__()
-        self.placeholder = nn.Identity()
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.placeholder(x)
-
-# Usage:
-# model = EmptyNetwork()
-# x = torch.randn(1, 10)  # Example input
-# output = model(x)
-# print(f"Output shape: {output.shape}")
-`
-}
-
-function generateErrorCode(error: any): string {
-  return `# Error generating PyTorch code: ${error}
-# Please check your network configuration and try again.
-
-import torch
-import torch.nn as nn
-
-class ErrorNetwork(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.error_layer = nn.Identity()
-    
-    def forward(self, x):
-        print("Network generation failed - using identity function")
-        return self.error_layer(x)
-`
-}
-
-function generateImports(): string {
-  return `import torch
+  let code = `import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
 
 `
-}
 
-function generateHelperClasses(components: Component[]): string {
-  const usedTypes = new Set(components.map((c) => c.type))
-  let code = ""
+  // Check which advanced components are actually used
+  const usedComponentTypes = new Set(components.map((comp) => comp.type))
 
-  if (usedTypes.has("CustomLayer")) {
-    const customLayers = components.filter((c) => c.type === "CustomLayer")
-    customLayers.forEach((comp) => {
-      if (comp.params.name && comp.params.code) {
-        code += `
-class ${comp.params.name}(nn.Module):
+  // Generate custom component classes first
+  const customComponents = components.filter((comp) => comp.type === "CustomLayer")
+
+  customComponents.forEach((comp) => {
+    if (comp.params.code && comp.params.code.trim()) {
+      code += `class ${comp.params.name || "CustomLayer"}(nn.Module):
     def __init__(self):
         super().__init__()
         ${comp.params.code
@@ -88,82 +30,351 @@ class ${comp.params.name}(nn.Module):
           .join("\n")}
 
 `
-      }
-    })
+    }
+  })
+
+  // Only add helper classes that are actually used
+  const helperClasses = generateHelperClasses(usedComponentTypes)
+  if (helperClasses.trim()) {
+    code += helperClasses
   }
 
-  return code
-}
-
-function generateMainNetworkClass(components: Component[], connections: Connection[]): string {
-  let code = `
-class GeneratedNetwork(nn.Module):
-    """
-    Generated Neural Network
-    
-    Architecture Summary:
-    - Total layers: ${components.length}
-    - Total connections: ${connections.length}
-    """
-    
+  code += `class GeneratedNetwork(nn.Module):
     def __init__(self):
         super().__init__()
         
-        # Network layers
 `
 
   // Generate layer definitions
   components.forEach((comp, index) => {
     const layerName = `layer_${index}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
-    code += generateLayerDefinition(comp, layerName)
+
+    try {
+      code += generateLayerDefinition(comp, layerName)
+    } catch (error) {
+      console.error(`Error processing component ${comp.type}:`, error)
+      code += `        # Error processing ${comp.type}: ${error}\n`
+    }
   })
 
   // Generate forward method
-  code += generateForwardMethod(components)
+  code += generateForwardMethod(components, connections)
+
+  code += `
+# Usage example:
+# model = GeneratedNetwork()
+# print(model)
+# 
+# # For training:
+# optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+# criterion = nn.CrossEntropyLoss()
+`
+
+  return code
+}
+
+function generateHelperClasses(usedComponentTypes: Set<string>): string {
+  let code = ""
+
+  if (usedComponentTypes.has("RotaryPositionalEncoding")) {
+    code += `
+class RotaryPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 8192):
+        super().__init__()
+        self.d_model = d_model
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, d_model, 2).float() / d_model))
+        self.register_buffer('inv_freq', inv_freq)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        seq_len = x.size(1)
+        t = torch.arange(seq_len, device=x.device).type_as(self.inv_freq)
+        freqs = torch.einsum('i,j->ij', t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        return emb[None, :, :]
+
+`
+  }
+
+  if (usedComponentTypes.has("ALiBi")) {
+    code += `
+class ALiBi(nn.Module):
+    def __init__(self, num_heads: int):
+        super().__init__()
+        self.num_heads = num_heads
+        slopes = torch.Tensor(self._get_slopes(num_heads))
+        self.register_buffer('slopes', slopes)
+        
+    def _get_slopes(self, n):
+        def get_slopes_power_of_2(n):
+            start = (2**(-2**-(math.log2(n)-3)))
+            ratio = start
+            return [start*ratio**i for i in range(n)]
+        
+        if math.log2(n).is_integer():
+            return get_slopes_power_of_2(n)
+        else:
+            closest_power_of_2 = 2**math.floor(math.log2(n))
+            return get_slopes_power_of_2(closest_power_of_2) + self._get_slopes(2*closest_power_of_2)[0::2][:n-closest_power_of_2]
+    
+    def forward(self, attention_scores: torch.Tensor) -> torch.Tensor:
+        seq_len = attention_scores.size(-1)
+        bias = torch.arange(seq_len).unsqueeze(0) - torch.arange(seq_len).unsqueeze(1)
+        bias = bias.abs() * -1
+        bias = bias.unsqueeze(0) * self.slopes.view(-1, 1, 1)
+        return attention_scores + bias
+
+`
+  }
+
+  if (usedComponentTypes.has("MixtureOfExperts")) {
+    code += `
+class MixtureOfExperts(nn.Module):
+    def __init__(self, d_model: int, num_experts: int, top_k: int, d_ff: int):
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.gate = nn.Linear(d_model, num_experts)
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_ff),
+                nn.ReLU(),
+                nn.Linear(d_ff, d_model)
+            ) for _ in range(num_experts)
+        ])
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, d_model = x.shape
+        x_flat = x.view(-1, d_model)
+        
+        gate_scores = self.gate(x_flat)
+        top_k_scores, top_k_indices = torch.topk(gate_scores, self.top_k, dim=-1)
+        top_k_scores = F.softmax(top_k_scores, dim=-1)
+        
+        output = torch.zeros_like(x_flat)
+        for i in range(self.top_k):
+            expert_idx = top_k_indices[:, i]
+            expert_score = top_k_scores[:, i].unsqueeze(-1)
+            for expert_id in range(self.num_experts):
+                mask = (expert_idx == expert_id)
+                if mask.any():
+                    expert_output = self.experts[expert_id](x_flat[mask])
+                    output[mask] += expert_score[mask] * expert_output
+                    
+        return output.view(batch_size, seq_len, d_model)
+
+`
+  }
+
+  if (usedComponentTypes.has("GroupedQueryAttention")) {
+    code += `
+class GroupedQueryAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, num_kv_heads: int):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = d_model // num_heads
+        
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, num_kv_heads * self.head_dim)
+        self.v_proj = nn.Linear(d_model, num_kv_heads * self.head_dim)
+        self.o_proj = nn.Linear(d_model, d_model)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, _ = x.shape
+        
+        q = self.q_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim)
+        k = self.k_proj(x).view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        v = self.v_proj(x).view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        
+        # Repeat k,v for grouped attention
+        k = k.repeat_interleave(self.num_heads // self.num_kv_heads, dim=2)
+        v = v.repeat_interleave(self.num_heads // self.num_kv_heads, dim=2)
+        
+        # Scaled dot-product attention
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_output = torch.matmul(attn_weights, v)
+        
+        attn_output = attn_output.view(batch_size, seq_len, self.d_model)
+        return self.o_proj(attn_output)
+
+`
+  }
+
+  if (usedComponentTypes.has("MambaBlock")) {
+    code += `
+class MambaBlock(nn.Module):
+    def __init__(self, d_model: int, d_state: int = 16, d_conv: int = 4, expand: int = 2):
+        super().__init__()
+        self.d_model = d_model
+        self.d_state = d_state
+        self.d_conv = d_conv
+        self.expand = expand
+        
+        d_inner = d_model * expand
+        self.in_proj = nn.Linear(d_model, d_inner * 2)
+        self.conv1d = nn.Conv1d(d_inner, d_inner, d_conv, padding=d_conv-1, groups=d_inner)
+        self.x_proj = nn.Linear(d_inner, d_state * 2)
+        self.dt_proj = nn.Linear(d_inner, d_inner)
+        self.out_proj = nn.Linear(d_inner, d_model)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, seq_len, d_model = x.shape
+        
+        # Input projection
+        x_and_res = self.in_proj(x)
+        x, res = x_and_res.split(self.d_model * self.expand, dim=-1)
+        
+        # Convolution
+        x = x.transpose(1, 2)  # (B, D, L)
+        x = self.conv1d(x)[:, :, :seq_len]
+        x = x.transpose(1, 2)  # (B, L, D)
+        
+        # SSM
+        x = F.silu(x)
+        
+        # Simplified SSM computation (actual Mamba is more complex)
+        y = x * F.sigmoid(self.dt_proj(x))
+        
+        # Output projection
+        y = y * F.silu(res)
+        return self.out_proj(y)
+
+`
+  }
 
   return code
 }
 
 function generateLayerDefinition(comp: Component, layerName: string): string {
-  const params = comp.params || {}
+  let code = ""
 
   switch (comp.type) {
+    case "CustomLayer":
+      code += `        self.${layerName} = ${comp.params.name || "CustomLayer"}()\n`
+      break
+
     case "Linear":
-      return `        self.${layerName} = nn.Linear(${params.input_size || 512}, ${params.output_size || 512})\n`
+      code += `        self.${layerName} = nn.Linear(${comp.params.input_size || 512}, ${comp.params.output_size || 512}`
+      if (comp.params.bias !== undefined) code += `, bias=${comp.params.bias}`
+      code += ")\n"
+      break
+
+    case "Conv1D":
+      code += `        self.${layerName} = nn.Conv1d(${comp.params.in_channels || 64}, ${comp.params.out_channels || 64}, ${comp.params.kernel_size || 3}`
+      if (comp.params.stride) code += `, stride=${comp.params.stride}`
+      if (comp.params.padding) code += `, padding=${comp.params.padding}`
+      code += ")\n"
+      break
 
     case "Conv2D":
-      return `        self.${layerName} = nn.Conv2d(${params.in_channels || 3}, ${params.out_channels || 64}, ${params.kernel_size || 3}, padding=${params.padding || 1})\n`
+      code += `        self.${layerName} = nn.Conv2d(${comp.params.in_channels || 3}, ${comp.params.out_channels || 64}, ${comp.params.kernel_size || 3}`
+      if (comp.params.stride) code += `, stride=${comp.params.stride}`
+      if (comp.params.padding) code += `, padding=${comp.params.padding}`
+      code += ")\n"
+      break
 
-    case "ReLU":
-      return `        self.${layerName} = nn.ReLU()\n`
-
-    case "GELU":
-      return `        self.${layerName} = nn.GELU()\n`
-
-    case "Dropout":
-      return `        self.${layerName} = nn.Dropout(${params.p || 0.1})\n`
-
-    case "LayerNorm":
-      return `        self.${layerName} = nn.LayerNorm(${params.normalized_shape || 512})\n`
+    case "Embedding":
+      code += `        self.${layerName} = nn.Embedding(${comp.params.vocab_size || 50000}, ${comp.params.embed_dim || 512})\n`
+      break
 
     case "MultiHeadAttention":
-      return `        self.${layerName} = nn.MultiheadAttention(${params.d_model || 512}, ${params.num_heads || 8}, batch_first=True)\n`
+      code += `        self.${layerName} = nn.MultiheadAttention(embed_dim=${comp.params.d_model || 512}, num_heads=${comp.params.num_heads || 8}`
+      if (comp.params.dropout) code += `, dropout=${comp.params.dropout}`
+      code += ")\n"
+      break
 
-    case "CustomLayer":
-      if (params.name) {
-        return `        self.${layerName} = ${params.name}()\n`
+    case "GroupedQueryAttention":
+      code += `        self.${layerName} = GroupedQueryAttention(d_model=${comp.params.d_model || 512}, num_heads=${comp.params.num_heads || 8}, num_kv_heads=${comp.params.num_kv_heads || 2})\n`
+      break
+
+    case "SparseAttention":
+      code += `        self.${layerName} = nn.MultiheadAttention(embed_dim=${comp.params.d_model || 512}, num_heads=${comp.params.num_heads || 8})\n`
+      code += `        # Note: Sparse attention pattern not fully implemented in this example\n`
+      break
+
+    case "MixtureOfExperts":
+      code += `        self.${layerName} = MixtureOfExperts(d_model=${comp.params.d_model || 512}, num_experts=${comp.params.num_experts || 8}, top_k=${comp.params.top_k || 2}, d_ff=${comp.params.d_ff || 2048})\n`
+      break
+
+    case "MambaBlock":
+      code += `        self.${layerName} = MambaBlock(d_model=${comp.params.d_model || 512}, d_state=${comp.params.d_state || 16}, d_conv=${comp.params.d_conv || 4}, expand=${comp.params.expand || 2})\n`
+      break
+
+    case "RotaryPositionalEncoding":
+      code += `        self.${layerName} = RotaryPositionalEncoding(d_model=${comp.params.d_model || 512}, max_len=${comp.params.max_len || 8192})\n`
+      break
+
+    case "ALiBi":
+      code += `        self.${layerName} = ALiBi(num_heads=${comp.params.num_heads || 8})\n`
+      break
+
+    case "TransformerBlock":
+    case "GPTBlock":
+    case "LlamaBlock":
+      code += `        self.${layerName} = nn.TransformerEncoderLayer(d_model=${comp.params.d_model || 512}, nhead=${comp.params.num_heads || 8}`
+      if (comp.params.d_ff) code += `, dim_feedforward=${comp.params.d_ff}`
+      if (comp.params.dropout) code += `, dropout=${comp.params.dropout}`
+      code += ")\n"
+      break
+
+    case "LayerNorm":
+      code += `        self.${layerName} = nn.LayerNorm(${comp.params.normalized_shape || 512})\n`
+      break
+
+    case "BatchNorm":
+      code += `        self.${layerName} = nn.BatchNorm1d(${comp.params.num_features || 512})\n`
+      break
+
+    case "Dropout":
+      code += `        self.${layerName} = nn.Dropout(${comp.params.p || 0.1})\n`
+      break
+
+    case "ReLU":
+    case "GELU":
+    case "SiLU":
+    case "Tanh":
+      code += `        self.${layerName} = nn.${comp.type}()\n`
+      break
+
+    case "Softmax":
+      code += `        self.${layerName} = nn.Softmax(dim=${comp.params.dim || -1})\n`
+      break
+
+    case "LeakyReLU":
+      code += `        self.${layerName} = nn.LeakyReLU(negative_slope=${comp.params.negative_slope || 0.01})\n`
+      break
+
+    case "FeedForward":
+      code += `        self.${layerName}_linear1 = nn.Linear(${comp.params.d_model || 512}, ${comp.params.d_ff || 2048})\n`
+      code += `        self.${layerName}_activation = nn.${comp.params.activation?.toUpperCase() || "GELU"}()\n`
+      code += `        self.${layerName}_linear2 = nn.Linear(${comp.params.d_ff || 2048}, ${comp.params.d_model || 512})\n`
+      if (comp.params.dropout) {
+        code += `        self.${layerName}_dropout = nn.Dropout(${comp.params.dropout})\n`
       }
-      return `        self.${layerName} = nn.Identity()  # Custom layer not configured\n`
+      break
+
+    case "GLU":
+      code += `        self.${layerName}_gate = nn.Linear(${comp.params.d_model || 512}, ${comp.params.d_ff || 2048})\n`
+      code += `        self.${layerName}_up = nn.Linear(${comp.params.d_model || 512}, ${comp.params.d_ff || 2048})\n`
+      code += `        self.${layerName}_down = nn.Linear(${comp.params.d_ff || 2048}, ${comp.params.d_model || 512})\n`
+      break
 
     default:
-      return `        self.${layerName} = nn.Identity()  # ${comp.type}\n`
+      const params = Object.entries(comp.params || {})
+        .filter(([k, v]) => v !== null && v !== undefined && v !== "")
+        .map(([k, v]) => `${k}=${typeof v === "string" ? `"${v}"` : v}`)
+        .join(", ")
+      code += `        self.${layerName} = nn.${comp.type}(${params})\n`
   }
+
+  return code
 }
 
-function generateForwardMethod(components: Component[]): string {
+function generateForwardMethod(components: Component[], connections: Connection[]): string {
   let code = `
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward pass through the network."""
 `
 
   if (components.length === 0) {
@@ -171,49 +382,69 @@ function generateForwardMethod(components: Component[]): string {
     return code
   }
 
+  code += "        # Forward pass through layers\n"
+
   components.forEach((comp, index) => {
     const layerName = `layer_${index}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
 
-    if (comp.type === "MultiHeadAttention") {
-      code += `        x, _ = self.${layerName}(x, x, x)  # Self-attention\n`
-    } else {
-      code += `        x = self.${layerName}(x)\n`
+    switch (comp.type) {
+      case "MultiHeadAttention":
+      case "SparseAttention":
+        code += `        x, _ = self.${layerName}(x, x, x)  # self-attention\n`
+        break
+
+      case "GroupedQueryAttention":
+      case "MixtureOfExperts":
+      case "MambaBlock":
+        code += `        x = self.${layerName}(x)\n`
+        break
+
+      case "FeedForward":
+        code += `        x = self.${layerName}_linear1(x)\n`
+        code += `        x = self.${layerName}_activation(x)\n`
+        if (comp.params.dropout) {
+          code += `        x = self.${layerName}_dropout(x)\n`
+        }
+        code += `        x = self.${layerName}_linear2(x)\n`
+        break
+
+      case "GLU":
+        code += `        gate = self.${layerName}_gate(x)\n`
+        code += `        up = self.${layerName}_up(x)\n`
+        code += `        x = self.${layerName}_down(gate * F.${comp.params.activation || "silu"}(up))\n`
+        break
+
+      case "RotaryPositionalEncoding":
+        code += `        pos_emb = self.${layerName}(x)\n`
+        code += `        # Apply rotary encoding (simplified)\n`
+        code += `        x = x + pos_emb\n`
+        break
+
+      case "ALiBi":
+        code += `        # ALiBi bias applied during attention (placeholder)\n`
+        code += `        x = x  # ALiBi modifies attention scores, not input directly\n`
+        break
+
+      case "Residual":
+        code += `        # Residual connection (requires proper implementation)\n`
+        code += `        residual = x\n`
+        break
+
+      case "Concatenate":
+        code += `        # Concatenation (requires multiple inputs)\n`
+        code += `        x = x  # Placeholder for concatenation\n`
+        break
+
+      case "Split":
+        code += `        # Split tensor (returns multiple outputs)\n`
+        code += `        x = x  # Placeholder for split operation\n`
+        break
+
+      default:
+        code += `        x = self.${layerName}(x)\n`
     }
   })
 
   code += "        return x\n"
   return code
-}
-
-function generateUsageExample(): string {
-  return `
-
-# Usage Example
-if __name__ == "__main__":
-    # Create model
-    model = GeneratedNetwork()
-    
-    # Print model info
-    print("Model Architecture:")
-    print(model)
-    
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Total parameters: {total_params:,}")
-    
-    # Test forward pass
-    batch_size = 2
-    seq_len = 10
-    input_dim = 512
-    
-    x = torch.randn(batch_size, seq_len, input_dim)
-    print(f"Input shape: {x.shape}")
-    
-    try:
-        with torch.no_grad():
-            output = model(x)
-        print(f"Output shape: {output.shape}")
-        print("✅ Forward pass successful!")
-    except Exception as e:
-        print(f"❌ Error: {e}")
-`
 }

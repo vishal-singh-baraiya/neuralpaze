@@ -24,8 +24,10 @@ import { Toolbar } from "./toolbar"
 import { ComponentEditor } from "./component-editor"
 import { CodeModal } from "./code-modal"
 import { CustomNode } from "./custom-node"
+import { ModelTemplates } from "./features/model-templates"
+import { ModelInfo } from "./features/model-info"
 import { generatePyTorchCode } from "./utils/code-generator"
-import type { ComponentType } from "./types"
+import type { ComponentType, ModelTemplate } from "./types"
 
 const nodeTypes: NodeTypes = {
   customNode: CustomNode,
@@ -34,157 +36,15 @@ const nodeTypes: NodeTypes = {
 const initialNodes: Node[] = []
 const initialEdges: Edge[] = []
 
-// Complete ResizeObserver override and error suppression
-const setupResizeObserverSuppression = () => {
-  // Store original ResizeObserver
-  const OriginalResizeObserver = window.ResizeObserver
-
-  // Create a debounced ResizeObserver wrapper
-  class SafeResizeObserver {
-    private callback: ResizeObserverCallback
-    private observer: ResizeObserver | null = null
-    private timeoutId: NodeJS.Timeout | null = null
-
-    constructor(callback: ResizeObserverCallback) {
-      this.callback = callback
-      try {
-        this.observer = new OriginalResizeObserver((entries, observer) => {
-          // Clear any existing timeout
-          if (this.timeoutId) {
-            clearTimeout(this.timeoutId)
-          }
-
-          // Debounce the callback to prevent loops
-          this.timeoutId = setTimeout(() => {
-            try {
-              this.callback(entries, observer)
-            } catch (error) {
-              // Silently ignore ResizeObserver errors
-              if (!error.message?.includes("ResizeObserver")) {
-                console.warn("ResizeObserver callback error:", error)
-              }
-            }
-          }, 16) // ~60fps
-        })
-      } catch (error) {
-        console.warn("Failed to create ResizeObserver:", error)
-      }
-    }
-
-    observe(target: Element, options?: ResizeObserverOptions) {
-      try {
-        this.observer?.observe(target, options)
-      } catch (error) {
-        // Silently ignore
-      }
-    }
-
-    unobserve(target: Element) {
-      try {
-        this.observer?.unobserve(target)
-      } catch (error) {
-        // Silently ignore
-      }
-    }
-
-    disconnect() {
-      try {
-        if (this.timeoutId) {
-          clearTimeout(this.timeoutId)
-          this.timeoutId = null
-        }
-        this.observer?.disconnect()
-      } catch (error) {
-        // Silently ignore
-      }
-    }
-  }
-
-  // Override global ResizeObserver
-  window.ResizeObserver = SafeResizeObserver as any
-
-  // Suppress all error types
-  const originalError = console.error
-  const originalWarn = console.warn
-
-  console.error = (...args) => {
-    const message = args[0]?.toString() || ""
-    if (
-      message.includes("ResizeObserver") ||
-      message.includes("loop completed") ||
-      message.includes("loop limit exceeded")
-    ) {
-      return
-    }
-    originalError.apply(console, args)
-  }
-
-  console.warn = (...args) => {
-    const message = args[0]?.toString() || ""
-    if (message.includes("ResizeObserver")) {
-      return
-    }
-    originalWarn.apply(console, args)
-  }
-
-  // Handle window errors
-  const handleError = (event: ErrorEvent) => {
-    if (event.message?.includes("ResizeObserver") || event.error?.message?.includes("ResizeObserver")) {
-      event.stopImmediatePropagation()
-      event.preventDefault()
-      return false
-    }
-  }
-
-  // Handle unhandled promise rejections
-  const handleRejection = (event: PromiseRejectionEvent) => {
-    const reason = event.reason?.toString() || ""
-    if (reason.includes("ResizeObserver")) {
-      event.preventDefault()
-      return false
-    }
-  }
-
-  window.addEventListener("error", handleError, { capture: true, passive: false })
-  window.addEventListener("unhandledrejection", handleRejection, { capture: true, passive: false })
-
-  // Return cleanup function
-  return () => {
-    window.ResizeObserver = OriginalResizeObserver
-    console.error = originalError
-    console.warn = originalWarn
-    window.removeEventListener("error", handleError, true)
-    window.removeEventListener("unhandledrejection", handleRejection, true)
-  }
-}
-
 function ANNDesignerFlow() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
   const [selectedNode, setSelectedNode] = useState<Node | null>(null)
   const [showCodeModal, setShowCodeModal] = useState(false)
+  const [showTemplates, setShowTemplates] = useState(false)
+  const [showModelInfo, setShowModelInfo] = useState(false)
   const [generatedCode, setGeneratedCode] = useState("")
-  const [isReady, setIsReady] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
-  const cleanupRef = useRef<(() => void) | null>(null)
-
-  // Setup error suppression and delayed initialization
-  useEffect(() => {
-    // Setup ResizeObserver suppression immediately
-    cleanupRef.current = setupResizeObserverSuppression()
-
-    // Delay React Flow initialization to prevent conflicts
-    const initTimer = setTimeout(() => {
-      setIsReady(true)
-    }, 200)
-
-    return () => {
-      clearTimeout(initTimer)
-      if (cleanupRef.current) {
-        cleanupRef.current()
-      }
-    }
-  }, [])
 
   const onConnect = useCallback(
     (params: Connection) =>
@@ -227,6 +87,48 @@ function ANNDesignerFlow() {
       setNodes((nds) => nds.concat(newNode))
     },
     [setNodes],
+  )
+
+  const loadTemplate = useCallback(
+    (template: ModelTemplate) => {
+      // Clear existing nodes and edges
+      setNodes([])
+      setEdges([])
+
+      // Add template components
+      const newNodes: Node[] = template.components.map((comp, index) => ({
+        id: `template-${index}`,
+        type: "customNode",
+        position: { x: 100 + (index % 3) * 250, y: 100 + Math.floor(index / 3) * 150 },
+        data: {
+          type: comp.type,
+          icon: comp.icon,
+          color: comp.color,
+          params: { ...comp.params },
+          description: comp.description,
+        },
+        dragHandle: ".drag-handle",
+      }))
+
+      // Add template connections
+      const newEdges: Edge[] = template.connections.map((conn, index) => ({
+        id: `template-edge-${index}`,
+        source: `template-${conn.from}`,
+        target: `template-${conn.to}`,
+        sourceHandle: conn.fromPort,
+        targetHandle: conn.toPort,
+        animated: true,
+        style: {
+          stroke: "#60A5FA",
+          strokeWidth: 3,
+        },
+      }))
+
+      setNodes(newNodes)
+      setEdges(newEdges)
+      setShowTemplates(false)
+    },
+    [setNodes, setEdges],
   )
 
   const updateNode = useCallback(
@@ -347,18 +249,6 @@ function ANNDesignerFlow() {
     }
   }
 
-  // Show loading screen while initializing
-  if (!isReady) {
-    return (
-      <div className="w-full h-screen bg-black flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-          <div className="text-white text-lg">Initializing NeuralPaze...</div>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div className="w-full h-screen bg-black flex overflow-hidden">
       {/* Component Library Sidebar */}
@@ -367,7 +257,15 @@ function ANNDesignerFlow() {
       {/* Main Content */}
       <div className="flex-1 flex flex-col">
         {/* Toolbar */}
-        <Toolbar onExport={exportNetwork} onImport={importNetwork} onGenerateCode={generateCode} />
+        <Toolbar
+          onExport={exportNetwork}
+          onImport={importNetwork}
+          onGenerateCode={generateCode}
+          onShowTemplates={() => setShowTemplates(true)}
+          onShowModelInfo={() => setShowModelInfo(true)}
+          nodeCount={nodes.length}
+          edgeCount={edges.length}
+        />
 
         {/* React Flow Canvas */}
         <div ref={containerRef} className="flex-1 bg-black">
@@ -398,12 +296,6 @@ function ANNDesignerFlow() {
               },
             }}
             proOptions={{ hideAttribution: true }}
-            onError={(id, message) => {
-              // Suppress React Flow errors
-              if (!message.includes("ResizeObserver")) {
-                console.warn("React Flow error:", id, message)
-              }
-            }}
           >
             <Controls
               className="!bg-black/80 !backdrop-blur-xl !border !border-white/20 !rounded-lg"
@@ -441,6 +333,14 @@ function ANNDesignerFlow() {
         />
       )}
 
+      {/* Templates Modal */}
+      {showTemplates && <ModelTemplates onLoadTemplate={loadTemplate} onClose={() => setShowTemplates(false)} />}
+
+      {/* Model Info Modal */}
+      {showModelInfo && (
+        <ModelInfo onClose={() => setShowModelInfo(false)} nodeCount={nodes.length} edgeCount={edges.length} />
+      )}
+
       {/* Code Generation Modal */}
       {showCodeModal && <CodeModal code={generatedCode} onClose={() => setShowCodeModal(false)} />}
     </div>
@@ -448,6 +348,36 @@ function ANNDesignerFlow() {
 }
 
 export function ANNDesigner() {
+  useEffect(() => {
+    // Suppress ResizeObserver errors globally
+    const originalError = console.error
+    console.error = (...args) => {
+      if (
+        typeof args[0] === "string" &&
+        args[0].includes("ResizeObserver loop completed with undelivered notifications")
+      ) {
+        return
+      }
+      originalError.apply(console, args)
+    }
+
+    // Handle window errors
+    const handleError = (event: ErrorEvent) => {
+      if (event.message?.includes("ResizeObserver loop completed with undelivered notifications")) {
+        event.stopImmediatePropagation()
+        event.preventDefault()
+        return false
+      }
+    }
+
+    window.addEventListener("error", handleError)
+
+    return () => {
+      console.error = originalError
+      window.removeEventListener("error", handleError)
+    }
+  }, [])
+
   return (
     <ReactFlowProvider>
       <ANNDesignerFlow />

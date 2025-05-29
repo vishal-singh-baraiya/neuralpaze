@@ -29,3 +29,21 @@ export interface ComponentType {
 export interface ComponentCategory {
   [key: string]: ComponentType[]
 }
+
+export interface ModelTemplate {
+  id: string
+  name: string
+  description: string
+  category: string
+  components: ComponentType[]
+  connections: {
+    from: number
+    to: number
+    fromPort: string
+    toPort: string
+  }[]
+}
+
+export interface ModelTemplateCategory {
+  [key: string]: ModelTemplate[]
+}
