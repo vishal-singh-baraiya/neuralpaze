@@ -9,7 +9,7 @@ export function generatePyTorchCode(components: Component[], connections: Connec
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
 
 `
 
@@ -45,7 +45,7 @@ from typing import Optional, Tuple
         
 `
 
-  // Generate layer definitions
+  // Generate layer definitions (still need all layers defined)
   components.forEach((comp, index) => {
     const layerName = `layer_${index}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
 
@@ -57,8 +57,8 @@ from typing import Optional, Tuple
     }
   })
 
-  // Generate forward method
-  code += generateForwardMethod(components, connections)
+  // Generate forward method with proper connection order
+  code += generateForwardMethodWithConnections(components, connections)
 
   code += `
 # Usage example:
@@ -73,6 +73,243 @@ from typing import Optional, Tuple
   return code
 }
 
+function topologicalSort(components: Component[], connections: Connection[]): Component[] {
+  // Create a map from component id to component
+  const componentMap = new Map<string, Component>()
+  components.forEach(comp => {
+    componentMap.set(comp.id, comp)
+  })
+
+  // Build adjacency list and in-degree count
+  const adjList = new Map<string, string[]>()
+  const inDegree = new Map<string, number>()
+  
+  // Initialize
+  components.forEach(comp => {
+    adjList.set(comp.id, [])
+    inDegree.set(comp.id, 0)
+  })
+
+  // Build the graph from connections
+  connections.forEach(conn => {
+    if (adjList.has(conn.source) && adjList.has(conn.target)) {
+      adjList.get(conn.source)!.push(conn.target)
+      inDegree.set(conn.target, (inDegree.get(conn.target) || 0) + 1)
+    }
+  })
+
+  // Find nodes with no incoming edges (input nodes)
+  const queue: string[] = []
+  inDegree.forEach((degree, nodeId) => {
+    if (degree === 0) {
+      queue.push(nodeId)
+    }
+  })
+
+  const sortedOrder: Component[] = []
+  
+  while (queue.length > 0) {
+    const currentId = queue.shift()!
+    const currentComp = componentMap.get(currentId)
+    
+    if (currentComp) {
+      sortedOrder.push(currentComp)
+    }
+
+    // Process neighbors
+    const neighbors = adjList.get(currentId) || []
+    neighbors.forEach(neighborId => {
+      const newInDegree = (inDegree.get(neighborId) || 0) - 1
+      inDegree.set(neighborId, newInDegree)
+      
+      if (newInDegree === 0) {
+        queue.push(neighborId)
+      }
+    })
+  }
+
+  // If we couldn't sort all components (cycle detected or disconnected components),
+  // include remaining components at the end
+  const processedIds = new Set(sortedOrder.map(comp => comp.id))
+  components.forEach(comp => {
+    if (!processedIds.has(comp.id)) {
+      sortedOrder.push(comp)
+    }
+  })
+
+  return sortedOrder
+}
+
+function generateForwardMethodWithConnections(components: Component[], connections: Connection[]): string {
+  let code = `
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+`
+
+  if (components.length === 0) {
+    code += "        return x\n"
+    return code
+  }
+
+  // Get components in topological order
+  const sortedComponents = topologicalSort(components, connections)
+  
+  // Create connection mapping
+  const connectionMap = new Map<string, Connection[]>()
+  connections.forEach(conn => {
+    if (!connectionMap.has(conn.target)) {
+      connectionMap.set(conn.target, [])
+    }
+    connectionMap.get(conn.target)!.push(conn)
+  })
+
+  // Track which components have multiple inputs (need special handling)
+  const multiInputComponents = new Set<string>()
+  connectionMap.forEach((conns, targetId) => {
+    if (conns.length > 1) {
+      multiInputComponents.add(targetId)
+    }
+  })
+
+  code += "        # Forward pass through layers following connection order\n"
+  code += "        layer_outputs: Dict[str, torch.Tensor] = {}\n"
+  code += "        \n"
+
+  // Process components in topological order
+  sortedComponents.forEach((comp, orderIndex) => {
+    const originalIndex = components.findIndex(c => c.id === comp.id)
+    const layerName = `layer_${originalIndex}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
+    const varName = `output_${originalIndex}`
+    
+    // Determine input for this component
+    const inputConnections = connectionMap.get(comp.id) || []
+    let inputCode = ""
+    
+    if (inputConnections.length === 0) {
+      // No incoming connections - use original input or previous output
+      if (orderIndex === 0) {
+        inputCode = "x"
+      } else {
+        // For disconnected components, use the main flow
+        inputCode = "x"
+      }
+    } else if (inputConnections.length === 1) {
+      // Single input connection
+      const sourceComp = components.find(c => c.id === inputConnections[0].source)
+      if (sourceComp) {
+        const sourceIndex = components.findIndex(c => c.id === sourceComp.id)
+        inputCode = `layer_outputs.get('${sourceComp.id}', x)`
+      } else {
+        inputCode = "x"
+      }
+    } else {
+      // Multiple input connections - handle based on component type
+      if (comp.type === "Concatenate") {
+        const inputTensors = inputConnections.map(conn => {
+          const sourceComp = components.find(c => c.id === conn.source)
+          if (sourceComp) {
+            return `layer_outputs.get('${sourceComp.id}', x)`
+          }
+          return "x"
+        })
+        inputCode = `torch.cat([${inputTensors.join(", ")}], dim=-1)`
+      } else {
+        // For other components with multiple inputs, use the first connection or sum them
+        const sourceComp = components.find(c => c.id === inputConnections[0].source)
+        if (sourceComp) {
+          inputCode = `layer_outputs.get('${sourceComp.id}', x)`
+        } else {
+          inputCode = "x"
+        }
+      }
+    }
+
+    // Generate the layer execution code
+    code += generateLayerExecution(comp, layerName, varName, inputCode, originalIndex)
+    
+    // Store output for future use
+    code += `        layer_outputs['${comp.id}'] = ${varName}\n`
+    
+    // Update main flow variable
+    code += `        x = ${varName}\n`
+    code += "        \n"
+  })
+
+  code += "        return x\n"
+  return code
+}
+
+function generateLayerExecution(comp: Component, layerName: string, varName: string, inputCode: string, index: number): string {
+  let code = ""
+
+  switch (comp.type) {
+    case "MultiHeadAttention":
+    case "SparseAttention":
+      code += `        ${varName}, _ = self.${layerName}(${inputCode}, ${inputCode}, ${inputCode})  # self-attention\n`
+      break
+
+    case "GroupedQueryAttention":
+    case "MixtureOfExperts":
+    case "MambaBlock":
+      code += `        ${varName} = self.${layerName}(${inputCode})\n`
+      break
+
+    case "FeedForward":
+      code += `        ${varName} = self.${layerName}_linear1(${inputCode})\n`
+      code += `        ${varName} = self.${layerName}_activation(${varName})\n`
+      if (comp.params.dropout) {
+        code += `        ${varName} = self.${layerName}_dropout(${varName})\n`
+      }
+      code += `        ${varName} = self.${layerName}_linear2(${varName})\n`
+      break
+
+    case "GLU":
+      code += `        gate = self.${layerName}_gate(${inputCode})\n`
+      code += `        up = self.${layerName}_up(${inputCode})\n`
+      code += `        ${varName} = self.${layerName}_down(gate * F.${comp.params.activation || "silu"}(up))\n`
+      break
+
+    case "RotaryPositionalEncoding":
+      code += `        pos_emb = self.${layerName}(${inputCode})\n`
+      code += `        ${varName} = ${inputCode} + pos_emb\n`
+      break
+
+    case "ALiBi":
+      code += `        # ALiBi bias applied during attention (placeholder)\n`
+      code += `        ${varName} = ${inputCode}  # ALiBi modifies attention scores, not input directly\n`
+      break
+
+    case "Residual":
+      // For residual connections, we need to handle the skip connection
+      code += `        # Residual connection\n`
+      code += `        ${varName} = ${inputCode}  # Main path (skip connection should be handled by graph structure)\n`
+      break
+
+    case "Concatenate":
+      // Input code already handles concatenation for this type
+      code += `        ${varName} = ${inputCode}\n`
+      break
+
+    case "Split":
+      code += `        # Split tensor (using first output for now)\n`
+      const splitDim = comp.params.dim || -1
+      const numSplits = comp.params.num_splits || 2
+      code += `        split_outputs = torch.split(${inputCode}, ${inputCode}.size(${splitDim}) // ${numSplits}, dim=${splitDim})\n`
+      code += `        ${varName} = split_outputs[0]  # Using first split\n`
+      break
+
+    case "Add":
+      // For add operation with multiple inputs, input code should handle it
+      code += `        ${varName} = ${inputCode}\n`
+      break
+
+    default:
+      code += `        ${varName} = self.${layerName}(${inputCode})\n`
+  }
+
+  return code
+}
+
+// Keep the existing helper functions unchanged
 function generateHelperClasses(usedComponentTypes: Set<string>): string {
   let code = ""
 
@@ -369,82 +606,5 @@ function generateLayerDefinition(comp: Component, layerName: string): string {
       code += `        self.${layerName} = nn.${comp.type}(${params})\n`
   }
 
-  return code
-}
-
-function generateForwardMethod(components: Component[], connections: Connection[]): string {
-  let code = `
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-`
-
-  if (components.length === 0) {
-    code += "        return x\n"
-    return code
-  }
-
-  code += "        # Forward pass through layers\n"
-
-  components.forEach((comp, index) => {
-    const layerName = `layer_${index}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
-
-    switch (comp.type) {
-      case "MultiHeadAttention":
-      case "SparseAttention":
-        code += `        x, _ = self.${layerName}(x, x, x)  # self-attention\n`
-        break
-
-      case "GroupedQueryAttention":
-      case "MixtureOfExperts":
-      case "MambaBlock":
-        code += `        x = self.${layerName}(x)\n`
-        break
-
-      case "FeedForward":
-        code += `        x = self.${layerName}_linear1(x)\n`
-        code += `        x = self.${layerName}_activation(x)\n`
-        if (comp.params.dropout) {
-          code += `        x = self.${layerName}_dropout(x)\n`
-        }
-        code += `        x = self.${layerName}_linear2(x)\n`
-        break
-
-      case "GLU":
-        code += `        gate = self.${layerName}_gate(x)\n`
-        code += `        up = self.${layerName}_up(x)\n`
-        code += `        x = self.${layerName}_down(gate * F.${comp.params.activation || "silu"}(up))\n`
-        break
-
-      case "RotaryPositionalEncoding":
-        code += `        pos_emb = self.${layerName}(x)\n`
-        code += `        # Apply rotary encoding (simplified)\n`
-        code += `        x = x + pos_emb\n`
-        break
-
-      case "ALiBi":
-        code += `        # ALiBi bias applied during attention (placeholder)\n`
-        code += `        x = x  # ALiBi modifies attention scores, not input directly\n`
-        break
-
-      case "Residual":
-        code += `        # Residual connection (requires proper implementation)\n`
-        code += `        residual = x\n`
-        break
-
-      case "Concatenate":
-        code += `        # Concatenation (requires multiple inputs)\n`
-        code += `        x = x  # Placeholder for concatenation\n`
-        break
-
-      case "Split":
-        code += `        # Split tensor (returns multiple outputs)\n`
-        code += `        x = x  # Placeholder for split operation\n`
-        break
-
-      default:
-        code += `        x = self.${layerName}(x)\n`
-    }
-  })
-
-  code += "        return x\n"
   return code
 }
