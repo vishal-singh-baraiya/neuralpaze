@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useCallback, useState } from "react"
+import { useCallback, useState, useEffect, useRef } from "react"
 import ReactFlow, {
   MiniMap,
   Controls,
@@ -15,6 +15,7 @@ import ReactFlow, {
   type Node,
   type NodeTypes,
   BackgroundVariant,
+  ReactFlowProvider,
 } from "reactflow"
 import "reactflow/dist/style.css"
 
@@ -33,12 +34,13 @@ const nodeTypes: NodeTypes = {
 const initialNodes: Node[] = []
 const initialEdges: Edge[] = []
 
-export function ANNDesigner() {
+function ANNDesignerFlow() {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
   const [selectedNode, setSelectedNode] = useState<Node | null>(null)
   const [showCodeModal, setShowCodeModal] = useState(false)
   const [generatedCode, setGeneratedCode] = useState("")
+  const containerRef = useRef<HTMLDivElement>(null)
 
   const onConnect = useCallback(
     (params: Connection) =>
@@ -212,7 +214,7 @@ export function ANNDesigner() {
         <Toolbar onExport={exportNetwork} onImport={importNetwork} onGenerateCode={generateCode} />
 
         {/* React Flow Canvas */}
-        <div className="flex-1 bg-black">
+        <div ref={containerRef} className="flex-1 bg-black">
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -222,9 +224,12 @@ export function ANNDesigner() {
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
             nodeTypes={nodeTypes}
-            fitView
             className="bg-black"
             style={{ background: "black" }}
+            defaultViewport={{ x: 0, y: 0, zoom: 1 }}
+            minZoom={0.2}
+            maxZoom={2}
+            fitView={false}
             connectionLineStyle={{
               stroke: "#60A5FA",
               strokeWidth: 3,
@@ -236,6 +241,7 @@ export function ANNDesigner() {
                 strokeWidth: 3,
               },
             }}
+            proOptions={{ hideAttribution: true }}
           >
             <Controls
               className="!bg-black/80 !backdrop-blur-xl !border !border-white/20 !rounded-lg"
@@ -276,5 +282,43 @@ export function ANNDesigner() {
       {/* Code Generation Modal */}
       {showCodeModal && <CodeModal code={generatedCode} onClose={() => setShowCodeModal(false)} />}
     </div>
+  )
+}
+
+export function ANNDesigner() {
+  useEffect(() => {
+    // Suppress ResizeObserver errors globally
+    const originalError = console.error
+    console.error = (...args) => {
+      if (
+        typeof args[0] === "string" &&
+        args[0].includes("ResizeObserver loop completed with undelivered notifications")
+      ) {
+        return
+      }
+      originalError.apply(console, args)
+    }
+
+    // Handle window errors
+    const handleError = (event: ErrorEvent) => {
+      if (event.message?.includes("ResizeObserver loop completed with undelivered notifications")) {
+        event.stopImmediatePropagation()
+        event.preventDefault()
+        return false
+      }
+    }
+
+    window.addEventListener("error", handleError)
+
+    return () => {
+      console.error = originalError
+      window.removeEventListener("error", handleError)
+    }
+  }, [])
+
+  return (
+    <ReactFlowProvider>
+      <ANNDesignerFlow />
+    </ReactFlowProvider>
   )
 }
