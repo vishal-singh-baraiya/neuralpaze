@@ -39,18 +39,20 @@ from typing import Optional, Tuple, Dict
     code += helperClasses
   }
 
+  // Sort components based on their connections to get execution order
+  const sortedComponents = topologicalSort(components, connections)
+  const connectionInfo = analyzeConnections(components, connections)
+
   code += `class GeneratedNetwork(nn.Module):
     def __init__(self):
         super().__init__()
         
 `
 
-  // Generate layer definitions - create a mapping from component ID to layer name
-  const componentToLayerName = new Map<string, string>()
-  components.forEach((comp, index) => {
-    const layerName = `layer_${index}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
-    componentToLayerName.set(comp.id, layerName)
-
+  // Generate layer definitions in the execution order, not original order
+  sortedComponents.forEach((comp, executionIndex) => {
+    const layerName = `step_${executionIndex}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
+    
     try {
       code += generateLayerDefinition(comp, layerName)
     } catch (error) {
@@ -59,8 +61,8 @@ from typing import Optional, Tuple, Dict
     }
   })
 
-  // Generate forward method with proper connection handling
-  code += generateForwardMethodWithConnections(components, connections, componentToLayerName)
+  // Generate forward method
+  code += generateForwardMethodWithConnections(sortedComponents, connectionInfo)
 
   code += `
 # Usage example:
@@ -121,11 +123,16 @@ function topologicalSort(components: Component[], connections: Connection[]): Co
     })
   }
 
-  // If we couldn't sort all components, there might be a cycle
-  // In that case, fall back to original order
+  // If we couldn't sort all components, there might be a cycle or disconnected components
   if (result.length !== components.length) {
-    console.warn("Cycle detected in network connections, using original component order")
-    return components
+    console.warn("Could not perform complete topological sort - using original order for missing components")
+    // Add any missing components at the end
+    const resultIds = new Set(result.map(c => c.id))
+    components.forEach(comp => {
+      if (!resultIds.has(comp.id)) {
+        result.push(comp)
+      }
+    })
   }
 
   return result
@@ -151,20 +158,19 @@ function analyzeConnections(components: Component[], connections: Connection[]) 
   return connectionMap
 }
 
-function generateForwardMethodWithConnections(components: Component[], connections: Connection[], componentToLayerName: Map<string, string>): string {
+function generateForwardMethodWithConnections(
+  sortedComponents: Component[], 
+  connectionInfo: Map<string, { inputs: string[], outputs: string[] }>
+): string {
   let code = `
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 `
 
-  if (components.length === 0) {
+  if (sortedComponents.length === 0) {
     code += "        return x\n"
     return code
   }
 
-  // Sort components based on their connections
-  const sortedComponents = topologicalSort(components, connections)
-  const connectionInfo = analyzeConnections(components, connections)
-  
   code += "        # Forward pass following the network connections\n"
   code += "        activations: Dict[str, torch.Tensor] = {}\n"
   code += "        \n"
@@ -191,21 +197,33 @@ function generateForwardMethodWithConnections(components: Component[], connectio
       }
     })
     code += "        \n"
+  } else {
+    // No clear input components, use first component as input
+    code += `        # No clear input component found, using first component\n`
+    code += `        activations['${sortedComponents[0].id}'] = x\n`
+    code += "        \n"
   }
 
-  // Process components in topological order
-  sortedComponents.forEach((comp) => {
-    const layerName = componentToLayerName.get(comp.id)!
+  // Process components in execution order
+  sortedComponents.forEach((comp, executionIndex) => {
+    const layerName = `step_${executionIndex}_${comp.type.toLowerCase().replace(/[^a-z0-9]/g, "_")}`
     const compInfo = connectionInfo.get(comp.id)!
+    
+    // Skip if this is an input component that's already initialized
+    if (inputComponents.includes(comp) && compInfo.inputs.length === 0) {
+      return
+    }
     
     // Determine input for this component
     let inputExpression = ""
     if (compInfo.inputs.length === 0) {
-      // This is an input component, skip processing if already initialized
-      if (inputComponents.includes(comp)) {
-        return
+      // This component has no connections, use previous activation or input
+      if (executionIndex === 0) {
+        inputExpression = "x"
+      } else {
+        const prevComp = sortedComponents[executionIndex - 1]
+        inputExpression = `activations['${prevComp.id}']`
       }
-      inputExpression = "x"
     } else if (compInfo.inputs.length === 1) {
       // Single input
       inputExpression = `activations['${compInfo.inputs[0]}']`
@@ -225,7 +243,7 @@ function generateForwardMethodWithConnections(components: Component[], connectio
     }
 
     // Generate the forward pass for this component
-    code += `        # Process ${comp.type} (${comp.id})\n`
+    code += `        # Step ${executionIndex}: ${comp.type} (${comp.id})\n`
     
     switch (comp.type) {
       case "MultiHeadAttention":
