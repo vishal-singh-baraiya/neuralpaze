@@ -315,7 +315,7 @@ function ANNDesignerFlow() {
               variant={BackgroundVariant.Dots}
               gap={20}
               size={2}
-              color="rgba(255,255,255,0.3)"
+              color="rgba(255,255,255,0.1)"
               style={{ backgroundColor: "black" }}
             />
           </ReactFlow>
